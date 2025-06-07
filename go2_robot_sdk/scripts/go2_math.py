@@ -121,19 +121,21 @@ def get_robot_joints(footPositionValue, foot_num):
 
     # cos theory
     E = np.sqrt(foot_position_distance ** 2 - HIP_LENGTH ** 2)
-    y = np.arccos((E ** 2 + THIGH_LENGTH ** 2 - CALF_LENGTH ** 2) / (2 * E * THIGH_LENGTH))
-    S = np.arccos((CALF_LENGTH ** 2 + THIGH_LENGTH ** 2 - E ** 2) /
-                  (2 * CALF_LENGTH * THIGH_LENGTH)) - np.pi
+    y_arg = (E ** 2 + THIGH_LENGTH ** 2 - CALF_LENGTH ** 2) / (2 * E * THIGH_LENGTH)
+    y = np.arccos(np.clip(y_arg, -1.0, 1.0))
+    S_arg = (CALF_LENGTH ** 2 + THIGH_LENGTH ** 2 - E ** 2) / \
+        (2 * CALF_LENGTH * THIGH_LENGTH)
+    S = np.arccos(np.clip(S_arg, -1.0, 1.0)) - np.pi
     C = foot_position.x - base_tf_offset_hip_joint.x
     R = foot_position.y - base_tf_offset_hip_joint.y
 
     if foot_position.z < 0:
-        A = np.arcsin(-C / E) + y
+        A = np.arcsin(np.clip(-C / E, -1.0, 1.0)) + y
     else:
-        A = -np.pi + np.arcsin(C / E) + y
+        A = -np.pi + np.arcsin(np.clip(C / E, -1.0, 1.0)) + y
 
     O = np.sqrt(foot_position_distance ** 2 - C ** 2)  # noqa: E741
-    L = np.arcsin(R / O)
+    L = np.arcsin(np.clip(R / O, -1.0, 1.0))
 
     if foot_position.z > 0:
         P = -1
@@ -141,10 +143,10 @@ def get_robot_joints(footPositionValue, foot_num):
         P = 1
 
     if foot_num % 2 == 0:
-        J = P * (L - np.arcsin(HIP_LENGTH / O))
+        J = P * (L - np.arcsin(np.clip(HIP_LENGTH / O, -1.0, 1.0)))
 
     else:
-        J = P * (L + np.arcsin(HIP_LENGTH / O))
+        J = P * (L + np.arcsin(np.clip(HIP_LENGTH / O, -1.0, 1.0)))
 
     if math.isnan(J + A + S):
         return 0, 0, 0

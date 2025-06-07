@@ -38,13 +38,17 @@ def generate_launch_description():
     with_slam = LaunchConfiguration('slam', default='true')
     with_foxglove = LaunchConfiguration('foxglove', default='true')
     with_joystick = LaunchConfiguration('joystick', default='true')
+    print("with_joystick:", with_joystick)
     with_teleop = LaunchConfiguration('teleop', default='true')
 
     robot_token = os.getenv('ROBOT_TOKEN', '') # how does this work for multiple robots?
     robot_ip = os.getenv('ROBOT_IP', '')
     robot_ip_lst = robot_ip.replace(" ", "").split(",")
-    print("IP list:", robot_ip_lst)
 
+    x =PythonLaunchDescriptionSource([
+                    os.path.join(get_package_share_directory(
+                        'nav2_bringup'), 'launch', 'navigation_launch.py')
+                ])
 
     # these are debug only
     map_name = os.getenv('MAP_NAME', '3d_map')
@@ -80,6 +84,11 @@ def generate_launch_description():
     joy_params = os.path.join(
         get_package_share_directory('go2_robot_sdk'),
         'config', 'joystick.yaml'
+    )
+
+    teleop_params = os.path.join(
+        get_package_share_directory('go2_robot_sdk'),
+        'config', 'teleop_twist_joy.yaml'
     )
 
     default_config_topics = os.path.join(
@@ -131,7 +140,7 @@ def generate_launch_description():
                 executable='pointcloud_to_laserscan_node',
                 name='pointcloud_to_laserscan',
                 remappings=[
-                    ('cloud_in', 'point_cloud2'),
+                    ('cloud', 'point_cloud2'),
                     ('scan', 'scan'),
                 ],
                 parameters=[{
@@ -206,7 +215,7 @@ def generate_launch_description():
             executable='teleop_node',
             name='teleop_node',
             condition=IfCondition(with_joystick),
-            parameters=[default_config_topics],
+            parameters=[teleop_params]
         ),
         Node(
             package='twist_mux',
@@ -215,7 +224,8 @@ def generate_launch_description():
             condition=IfCondition(with_teleop),
             parameters=[
                 {'use_sim_time': use_sim_time},
-                default_config_topics
+                default_config_topics,
+                {'use_stamped': True}
             ],
         ),
 
@@ -237,10 +247,7 @@ def generate_launch_description():
         ),
 
         IncludeLaunchDescription(
-            PythonLaunchDescriptionSource([
-                os.path.join(get_package_share_directory(
-                    'nav2_bringup'), 'launch', 'navigation_launch.py')
-            ]),
+            x,
             condition=IfCondition(with_nav2),
             launch_arguments={
                 'params_file': nav2_config,

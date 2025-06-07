@@ -33,9 +33,9 @@ class LidarToPointCloud(Node):
     def __init__(self):
         super().__init__('lidar_to_pointcloud')
 
-        self.declare_parameter('robot_ip_lst')
-        self.declare_parameter('map_name')
-        self.declare_parameter('map_save')
+        self.declare_parameter('robot_ip_lst', [''])
+        self.declare_parameter('map_name', '3d_map')
+        self.declare_parameter('map_save', 'true')
 
         self.robot_ip_lst = self.get_parameter(
             'robot_ip_lst').get_parameter_value().string_array_value

@@ -204,7 +204,7 @@ class RobotBaseNode(Node):
         if self.conn_mode == 'single':
             self.create_subscription(
                 Twist,
-                'cmd_vel_out',
+                'cmd_vel',
                 lambda msg: self.cmd_vel_cb(msg, "0"),
                 qos_profile)
             self.create_subscription(
