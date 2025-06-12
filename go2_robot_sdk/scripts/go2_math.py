@@ -32,13 +32,56 @@ CALF_LENGTH = 0.2135
 
 
 class Quaternion:
+    """Represents a quaternion.
+
+    Attributes
+    ----------
+    x : float
+        The x component of the quaternion.
+    y : float
+        The y component of the quaternion.
+    z : float
+        The z component of the quaternion.
+    w : float
+        The w component of the quaternion.
+
+    """
     def __init__(self, x, y, z, w):
+        """Initializes a new Quaternion object.
+
+        Parameters
+        ----------
+        x : float
+            The x component.
+        y : float
+            The y component.
+        z : float
+            The z component.
+        w : float
+            The w component.
+
+        """
         self.x = x
         self.y = y
         self.z = z
         self.w = w
 
     def set_from_axis_angle(self, n, o):
+        """Sets the quaternion from an axis and an angle.
+
+        Parameters
+        ----------
+        n : Vector3
+            The axis of rotation.
+        o : float
+            The angle of rotation in radians.
+
+        Returns
+        -------
+        tuple[float, float, float, float]
+            The x, y, z, and w components of the new quaternion.
+
+        """
         s = o / 2
         c = math.sin(s)
         self.x = n.x * c
@@ -48,6 +91,16 @@ class Quaternion:
         return self.x, self.y, self.z, self.w
 
     def invert(self):
+        """Inverts the quaternion.
+
+        This negates the x, y, and z components.
+
+        Returns
+        -------
+        tuple[float, float, float, float]
+            The x, y, z, and w components of the inverted quaternion.
+
+        """
         self.x *= -1
         self.y *= -1
         self.z *= -1
@@ -55,22 +108,80 @@ class Quaternion:
 
 
 class Vector3:
+    """Represents a 3D vector.
+
+    Attributes
+    ----------
+    x : float
+        The x component of the vector.
+    y : float
+        The y component of the vector.
+    z : float
+        The z component of the vector.
+
+    """
     def __init__(self, x, y, z):
+        """Initializes a new Vector3 object.
+
+        Parameters
+        ----------
+        x : float
+            The x component.
+        y : float
+            The y component.
+        z : float
+            The z component.
+
+        """
         self.x = x
         self.y = y
         self.z = z
 
     def add(self, n):
+        """Adds another vector to this vector.
+
+        Parameters
+        ----------
+        n : Vector3
+            The vector to add.
+
+        Returns
+        -------
+        tuple[float, float, float]
+            The x, y, and z components of the resulting vector.
+
+        """
         self.x += n.x
         self.y += n.y
         self.z += n.z
         return self.x, self.y, self.z
 
     def clone(self):
+        """Creates a clone of this vector.
+
+        Returns
+        -------
+        Vector3
+            A new Vector3 object with the same x, y, and z components.
+
+        """
         new_vector = Vector3(self.x, self.y, self.z)
         return new_vector
 
     def apply_quaternion(self, quaternion):
+        """Applies a quaternion to this vector.
+
+        Parameters
+        ----------
+        quaternion : Quaternion
+            The quaternion to apply.
+
+        Returns
+        -------
+        tuple[float, float, float]
+            The x, y, and z components of the rotated vector.
+
+        """
         o = self.x
         s = self.y
         c = self.z
@@ -89,26 +200,98 @@ class Vector3:
         return self.x, self.y, self.z
 
     def negate(self):
+        """Negates this vector.
+
+        Returns
+        -------
+        tuple[float, float, float]
+            The x, y, and z components of the negated vector.
+
+        """
         self.x = -self.x
         self.y = -self.y
         self.z = -self.z
         return self.x, self.y, self.z
 
     def distance_to(self, n):
+        """Calculates the distance to another vector.
+
+        Parameters
+        ----------
+        n : Vector3
+            The other vector.
+
+        Returns
+        -------
+        float
+            The Euclidean distance between the two vectors.
+
+        """
         return math.sqrt(self.distance_to_squared(n))
 
     def distance_to_squared(self, n):
+        """Calculates the squared distance to another vector.
+
+        Parameters
+        ----------
+        n : Vector3
+            The other vector.
+
+        Returns
+        -------
+        float
+            The squared Euclidean distance between the two vectors.
+
+        """
         o = self.x - n.x
         s = self.y - n.y
         c = self.z - n.z
         return o * o + s * s + c * c
 
     def apply_axis_angle(self, n, o):
+        """Applies a rotation to this vector, defined by an axis and an angle.
+
+        Parameters
+        ----------
+        n : Vector3
+            The axis of rotation.
+        o : float
+            The angle of rotation in radians.
+
+        Returns
+        -------
+        tuple[float, float, float]
+            The x, y, and z components of the rotated vector.
+
+        """
         quaternion = Quaternion(0, 0, 0, 1)
-        return self.apply_quaternion(quaternion.set_from_axis_angle(n, o))
+        quaternion.set_from_axis_angle(n, o)
+        return self.apply_quaternion(quaternion)
 
 
 def get_robot_joints(footPositionValue, foot_num):
+    """Calculates the joint angles for a specific foot of the Go2 robot.
+
+    This function implements the inverse kinematics for one leg of the robot.
+
+    Parameters
+    ----------
+    footPositionValue : list[float] or tuple[float]
+        A list or tuple of 3 floats representing the target foot position
+        in the base frame [x, y, z].
+    foot_num : int
+        The identifier for the foot (0, 1, 2, or 3).
+
+    Returns
+    -------
+    tuple[float, float, float]
+        A tuple containing the calculated joint angles (J, A, S) in radians.
+        If the calculation results in NaN, it returns (0, 0, 0).
+        - J: Hip roll joint angle.
+        - A: Thigh joint angle.
+        - S: Calf joint angle.
+
+    """
     foot_position = Vector3(footPositionValue[0], footPositionValue[1], footPositionValue[2])
 
     base_tf_offset_hip_joint = Vector3(0.1934, 0.0465, 0)
