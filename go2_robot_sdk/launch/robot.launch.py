@@ -66,7 +66,7 @@ def generate_launch_description():
     if conn_type == 'cyclonedds':
         rviz_config = "cyclonedds_config.rviz"
 
-    urdf_file_name = 'multi_go2.urdf'
+    urdf_file_name = 'go2.urdf'
     urdf = os.path.join(
         get_package_share_directory('go2_robot_sdk'),
         "urdf",
@@ -215,7 +215,9 @@ def generate_launch_description():
             executable='teleop_node',
             name='teleop_node',
             condition=IfCondition(with_joystick),
-            parameters=[teleop_params]
+            #parameters=[teleop_params]
+            parameters=[{'axis_linear.x': 1, 'axis_linear.y': 0, 'axis_angular.yaw': 2, 'scale_linear.x': 0.2, 'scale_linear.y': 0.2,
+                           'scale_linear.z': 0.1, 'enable_button': 9, 'enable_turbo_button': 7}]
         ),
         Node(
             package='twist_mux',
@@ -247,11 +249,16 @@ def generate_launch_description():
         ),
 
         IncludeLaunchDescription(
-            x,
+            PythonLaunchDescriptionSource([
+                os.path.join(get_package_share_directory(
+                    'nav2_bringup'), 'launch', 'navigation_launch.py')
+            ]),
             condition=IfCondition(with_nav2),
             launch_arguments={
-                'params_file': nav2_config,
                 'use_sim_time': use_sim_time,
+                'params_file': nav2_config,
+                'use_composition': 'False',
+                'autostart': 'False'
             }.items(),
         ),
     ])
