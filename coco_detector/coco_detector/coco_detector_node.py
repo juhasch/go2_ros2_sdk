@@ -10,6 +10,7 @@ import collections
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import Image
 from vision_msgs.msg import BoundingBox2D, ObjectHypothesis, ObjectHypothesisWithPose
 from vision_msgs.msg import Detection2D, Detection2DArray
@@ -36,11 +37,14 @@ class CocoDetectorNode(Node):
         self.device = self.get_parameter('device').get_parameter_value().string_value
         self.detection_threshold = \
             self.get_parameter('detection_threshold').get_parameter_value().double_value
+        qos_profile = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            depth=10)
         self.subscription = self.create_subscription(
             Image,
             "/camera/image_raw",
             self.listener_callback,
-            10)
+            qos_profile=qos_profile)
         self.detected_objects_publisher = \
             self.create_publisher(Detection2DArray, "detected_objects", 10)
         if self.get_parameter('publish_annotated_image').get_parameter_value().bool_value:
