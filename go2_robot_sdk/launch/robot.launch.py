@@ -28,7 +28,7 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch.actions import IncludeLaunchDescription
-from launch.launch_description_sources import FrontendLaunchDescriptionSource, PythonLaunchDescriptionSource
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 def generate_launch_description():
 
@@ -36,10 +36,8 @@ def generate_launch_description():
     with_rviz2 = LaunchConfiguration('rviz2', default='true')
     with_nav2 = LaunchConfiguration('nav2', default='true')
     with_slam = LaunchConfiguration('slam', default='true')
-    with_foxglove = LaunchConfiguration('foxglove', default='true')
     with_joystick = LaunchConfiguration('joystick', default='true')
-    print("with_joystick:", with_joystick)
-    with_teleop = LaunchConfiguration('teleop', default='true')
+    with_teleop = LaunchConfiguration('teleop', default='true') 
 
     robot_token = os.getenv('ROBOT_TOKEN', '') # how does this work for multiple robots?
     robot_ip = os.getenv('ROBOT_IP', '')
@@ -85,21 +83,14 @@ def generate_launch_description():
         get_package_share_directory('go2_robot_sdk'),
         'config', 'joystick.yaml'
     )
-
+    
     teleop_params = os.path.join(
         get_package_share_directory('go2_robot_sdk'),
         'config', 'teleop_twist_joy.yaml'
-    )
-
+    )                  
     default_config_topics = os.path.join(
         get_package_share_directory('go2_robot_sdk'),
         'config', 'twist_mux.yaml')
-
-    foxglove_launch = os.path.join(
-        get_package_share_directory('foxglove_bridge'),
-        'launch',
-        'foxglove_bridge_launch.xml',
-    )
 
     slam_toolbox_config = os.path.join(
         get_package_share_directory('go2_robot_sdk'),
@@ -145,14 +136,13 @@ def generate_launch_description():
                 ],
                 parameters=[{
                     'target_frame': 'base_link',
-                    'max_height': 0.5
-                }],
+#                    'min_height': -1.0,
+#                    'max_height': 1.5
+                    }],
                 output='screen',
             ),
         )
-
     else:
-
         for i in range(len(robot_ip_lst)):
             urdf_launch_nodes.append(
                 Node(
@@ -215,7 +205,6 @@ def generate_launch_description():
             executable='teleop_node',
             name='teleop_node',
             condition=IfCondition(with_joystick),
-            #parameters=[teleop_params]
             parameters=[{'axis_linear.x': 1, 'axis_linear.y': 0, 'axis_angular.yaw': 2, 'scale_linear.x': 0.2, 'scale_linear.y': 0.2,
                            'scale_linear.z': 0.1, 'enable_button': 9, 'enable_turbo_button': 7}]
         ),
@@ -230,12 +219,6 @@ def generate_launch_description():
                 {'use_stamped': True}
             ],
         ),
-
-        IncludeLaunchDescription(
-            FrontendLaunchDescriptionSource(foxglove_launch),
-            condition=IfCondition(with_foxglove),
-        ),
-
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([
                 os.path.join(get_package_share_directory(
@@ -247,7 +230,6 @@ def generate_launch_description():
                 'use_sim_time': use_sim_time,
             }.items(),
         ),
-
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([
                 os.path.join(get_package_share_directory(
@@ -258,7 +240,8 @@ def generate_launch_description():
                 'use_sim_time': use_sim_time,
                 'params_file': nav2_config,
                 'use_composition': 'False',
-                'autostart': 'False'
+                'autostart': 'True',
+                'bt_navigator_log_level': 'debug'  # ← hier ergänzt
             }.items(),
         ),
     ])
