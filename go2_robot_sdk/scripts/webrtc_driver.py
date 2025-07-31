@@ -37,12 +37,10 @@ from Crypto.PublicKey import RSA
 from Crypto.Cipher import AES
 from Crypto.Cipher import PKCS1_v1_5
 import requests
-from aiortc import RTCPeerConnection, RTCSessionDescription
 
 # Monkey-patch aioice.Connection to use a fixed username and password accross all instances.
 
 import aioice
-
 
 class Connection(aioice.Connection):
     local_username = aioice.utils.random_string(4)
@@ -52,7 +50,6 @@ class Connection(aioice.Connection):
         super().__init__(*args, **kwargs)
         self.local_username = Connection.local_username
         self.local_password = Connection.local_password
-
 
 aioice.Connection = Connection  # type: ignore
 
@@ -81,9 +78,8 @@ elif Version(aiortc.__version__) >= Version("1.11.0"):
     }
     aiortc.rtcdtlstransport.X509_DIGEST_ALGORITHMS = X509_DIGEST_ALGORITHMS
 
-
+from aiortc import RTCPeerConnection, RTCSessionDescription
 from scripts.go2_lidar_decoder import LidarDecoder
-
 
 logging.basicConfig(level=logging.WARN)
 logger = logging.getLogger(__name__)
