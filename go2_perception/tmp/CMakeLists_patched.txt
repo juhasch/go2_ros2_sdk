@@ -1,0 +1,68 @@
+cmake_minimum_required(VERSION 3.18)          # 3.18+ kennt LINK_OPTIONS
+
+project(pointcloud_to_laserscan)
+
+find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
+find_package(Python3 REQUIRED COMPONENTS Development)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_components REQUIRED)
+find_package(laser_geometry REQUIRED)
+find_package(message_filters REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_sensor_msgs REQUIRED)
+find_package(pybind11 REQUIRED)
+
+# ---------- Work-around: dynamic_lookup raus ----------
+
+# 1) global linker flags bereinigen
+#string(REPLACE "-undefined dynamic_lookup" "" CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
+
+
+# ---------- Library als Component ----------
+add_library(pointcloud_to_laserscan SHARED
+  src/pointcloud_to_laserscan_node.cpp)
+
+target_include_directories(pointcloud_to_laserscan PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>)
+
+target_link_libraries(pointcloud_to_laserscan
+  pybind11::embed                      # libpython wird eingetragen
+  rclcpp::rclcpp
+  rclcpp_components::component          # muss zuerst stehen
+  Python3::Python 
+  laser_geometry::laser_geometry
+  message_filters::message_filters
+  tf2::tf2 tf2_ros::tf2_ros tf2_sensor_msgs::tf2_sensor_msgs)
+
+# Darwin-only: undefined Symbole hart verbieten
+target_link_options(pointcloud_to_laserscan PRIVATE "${no_undef}")
+
+install(TARGETS pointcloud_to_laserscan
+  LIBRARY DESTINATION lib)
+
+# ---------- Executable ----------
+rclcpp_components_register_node(pointcloud_to_laserscan
+  PLUGIN "pointcloud_to_laserscan::PointCloudToLaserScanNode"
+  EXECUTABLE pointcloud_to_laserscan_node)
+
+# Executable bekommt ebenfalls libpython und no_undef
+target_link_libraries(pointcloud_to_laserscan_node Python3::Python)
+target_link_options (pointcloud_to_laserscan_node PRIVATE "${no_undef}")
+
+# Add the conda lib dir to the install rpath so it can find libpython.
+set_target_properties(pointcloud_to_laserscan_node PROPERTIES
+  INSTALL_RPATH "$ENV{CONDA_PREFIX}/lib")
+
+# Rest wie gehabt …
+ament_export_dependencies(rclcpp Python3 laser_geometry message_filters sensor_msgs tf2 tf2_ros tf2_sensor_msgs)
+
+install(
+    DIRECTORY launch
+    DESTINATION share/${PROJECT_NAME}
+)
+
+ament_package()
