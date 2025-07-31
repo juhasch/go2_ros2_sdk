@@ -104,6 +104,17 @@ def generate_launch_description():
             default_value='default',
             description='Voice name for TTS'
         ),
+        DeclareLaunchArgument(
+            'obstacle_avoidance',
+            default_value='false',
+            description='Enable obstacle avoidance',
+        ),
+        DeclareLaunchArgument(
+            'enable_foxglove_bridge',
+            default_value='true',
+            description='Enable Foxglove Bridge'
+        ),
+
 
         # Group all nodes to ensure they share the same on_exit behavior
         GroupAction([
@@ -117,7 +128,8 @@ def generate_launch_description():
                     'conn_type': 'webrtc',
                     'enable_video': enable_video,
                     'decode_lidar': False,
-                    'publish_raw_voxel': True
+                    'publish_raw_voxel': True,
+                    'obstacle_avoidance': LaunchConfiguration('obstacle_avoidance'),
                 },
                     {
                     "qos_overrides": {
@@ -157,6 +169,7 @@ def generate_launch_description():
                     'send_buffer_limit': send_buffer_limit
                 }],
                 on_exit=on_exit,
+                condition=IfCondition(LaunchConfiguration('enable_foxglove_bridge')),
             ),
 
             # TTS node

@@ -30,8 +30,20 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def load_camera_info():
-    yaml_file = get_package_share_directory('go2_robot_sdk') + "/calibration/front_camera.yaml"
+def load_camera_info(resolution='1080'):
+    """
+    Load camera calibration info based on resolution.
+    
+    Args:
+        resolution (str): Camera resolution, either '720' or '1080'
+    
+    Returns:
+        CameraInfo: ROS2 CameraInfo message with calibration data
+    """
+    if resolution == '720':
+        yaml_file = get_package_share_directory('go2_robot_sdk') + "/calibration/front_camera_720.yaml"
+    else:
+        yaml_file = get_package_share_directory('go2_robot_sdk') + "/calibration/front_camera_1080.yaml"
 
     logger.info("Loading camera info from file: {}".format(yaml_file))
 

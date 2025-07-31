@@ -105,7 +105,6 @@ def generate_launch_description():
     )
 
     if conn_mode == 'single':
-
         urdf_file_name = 'go2.urdf'
         urdf = os.path.join(
             get_package_share_directory('go2_robot_sdk'),
@@ -131,15 +130,33 @@ def generate_launch_description():
                 executable='pointcloud_to_laserscan_node',
                 name='pointcloud_to_laserscan',
                 remappings=[
-                    ('cloud', 'point_cloud2'),
+                    ('cloud_in', 'point_cloud2'),
                     ('scan', 'scan'),
                 ],
                 parameters=[{
                     'target_frame': 'base_link',
-#                    'min_height': -1.0,
-#                    'max_height': 1.5
-                    }],
+#                    'transform_tolerance': 0.01,
+#                    'min_height': -0.1,
+                    'max_height': 0.5,
+#                    'angle_min': -3.14,  # -M_PI/2
+#                    'angle_max': 3.14,  # M_PI/2
+#                    'angle_increment': 0.0087,  # M_PI/360.0
+#                    'scan_time': 0.25,
+#                    'range_min': 0.10,
+#                    'range_max': 20.0,
+#                    'use_inf': True,
+#                    'inf_epsilon': 1.0
+                }],
                 output='screen',
+            ),
+        )
+        urdf_launch_nodes.append(
+            Node(
+                package='go2_perception', executable='cloud_accumulation',
+                remappings=[
+                    ('cloud', '/trans_cloud')
+                    ],
+                name='cloud_accumulation'
             ),
         )
     else:
@@ -158,7 +175,7 @@ def generate_launch_description():
             )
             urdf_launch_nodes.append(
                 Node(
-                    package='pointcloud_to_laserscan',
+                    package='go2_perception',
                     executable='pointcloud_to_laserscan_node',
                     name='pointcloud_to_laserscan',
                     remappings=[
@@ -174,17 +191,24 @@ def generate_launch_description():
             )
 
     return LaunchDescription([
-
         *urdf_launch_nodes,
         Node(
             package='go2_robot_sdk',
             executable='go2_driver_node',
             parameters=[{'robot_ip': robot_ip, 'token': robot_token, "conn_type": conn_type}],
+            remappings=[('cmd_vel', 'cmd_vel_robot')],
         ),
         Node(
-            package='go2_robot_sdk',
-            executable='lidar_to_pointcloud',
+            package='pointcloud_to_laserscan',
+            executable='pointcloud_to_laserscan_node',
             parameters=[{'robot_ip_lst': robot_ip_lst, 'map_name': map_name, 'map_save': save_map}],
+        ),
+        Node(
+            package='go2_perception', executable='cloud_accumulation',
+            remappings=[
+                ('cloud', '/trans_cloud')
+                ],
+            name='cloud_accumulation'
         ),
         Node(
             package='rviz2',
@@ -205,18 +229,19 @@ def generate_launch_description():
             executable='teleop_node',
             name='teleop_node',
             condition=IfCondition(with_joystick),
-            parameters=[{'axis_linear.x': 1, 'axis_linear.y': 0, 'axis_angular.yaw': 2, 'scale_linear.x': 0.2, 'scale_linear.y': 0.2,
-                           'scale_linear.z': 0.1, 'enable_button': 9, 'enable_turbo_button': 7}]
+            parameters=[joy_params],
+            remappings=[('cmd_vel', 'cmd_vel_joy')]
         ),
         Node(
             package='twist_mux',
             executable='twist_mux',
             output='screen',
             condition=IfCondition(with_teleop),
+            remappings=[('cmd_vel_out', 'cmd_vel_robot')],
             parameters=[
                 {'use_sim_time': use_sim_time},
                 default_config_topics,
-                {'use_stamped': True}
+                {'use_stamped': False}
             ],
         ),
         IncludeLaunchDescription(
@@ -230,18 +255,50 @@ def generate_launch_description():
                 'use_sim_time': use_sim_time,
             }.items(),
         ),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource([
-                os.path.join(get_package_share_directory(
-                    'nav2_bringup'), 'launch', 'navigation_launch.py')
-            ]),
+        # Nav2 nodes launched individually
+        Node(
+            package='nav2_controller',
+            executable='controller_server',
+            name='controller_server',
             condition=IfCondition(with_nav2),
-            launch_arguments={
-                'use_sim_time': use_sim_time,
-                'params_file': nav2_config,
-                'use_composition': 'False',
-                'autostart': 'True',
-                'bt_navigator_log_level': 'debug'  # ← hier ergänzt
-            }.items(),
+            parameters=[nav2_config],
+            remappings=[('cmd_vel', 'nav_cmd_vel')],
+            output='screen'
         ),
+        Node(
+            package='nav2_planner',
+            executable='planner_server',
+            name='planner_server',
+            condition=IfCondition(with_nav2),
+            parameters=[nav2_config],
+            output='screen'
+        ),
+        Node(
+            package='nav2_behaviors',
+            executable='behavior_server',
+            name='behavior_server',
+            condition=IfCondition(with_nav2),
+            parameters=[nav2_config],
+            remappings=[('cmd_vel', 'nav_cmd_vel')],
+            output='screen'
+        ),
+        Node(
+            package='nav2_bt_navigator',
+            executable='bt_navigator',
+            name='bt_navigator',
+            condition=IfCondition(with_nav2),
+            parameters=[nav2_config],
+            output='screen'
+        ),
+        Node(
+            package='nav2_lifecycle_manager',
+            executable='lifecycle_manager',
+            name='lifecycle_manager_navigation',
+            condition=IfCondition(with_nav2),
+            parameters=[{'autostart': True,
+                        'node_names': ['controller_server', 'planner_server', 'behavior_server', 'bt_navigator']}],
+            output='screen'
+        ),
+
+
     ])

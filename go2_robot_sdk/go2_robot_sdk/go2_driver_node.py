@@ -74,6 +74,8 @@ class RobotBaseNode(Node):
         self.declare_parameter('enable_video', True)
         self.declare_parameter('decode_lidar', True)
         self.declare_parameter('publish_raw_voxel', False)
+        self.declare_parameter('obstacle_avoidance', False)
+        self.declare_parameter('camera_resolution', '1080')
 
         self.robot_ip = self.get_parameter(
             'robot_ip').get_parameter_value().string_value
@@ -88,6 +90,10 @@ class RobotBaseNode(Node):
             'decode_lidar').get_parameter_value().bool_value
         self.publish_raw_voxel = self.get_parameter(
             'publish_raw_voxel').get_parameter_value().bool_value
+        self.obstacle_avoidance = self.get_parameter(
+            'obstacle_avoidance').get_parameter_value().bool_value
+        self.camera_resolution = self.get_parameter(
+            'camera_resolution').get_parameter_value().string_value
 
         self.conn_mode = "single" if (
             len(self.robot_ip_lst) == 1 and self.conn_type != "cyclonedds") else "multi"
@@ -99,6 +105,8 @@ class RobotBaseNode(Node):
         self.get_logger().info(f"Decode lidar is {self.decode_lidar}")
         self.get_logger().info(
             f"Publish raw voxel is {self.publish_raw_voxel}")
+        self.get_logger().info(f"Obstacle avoidance is {self.obstacle_avoidance}")
+        self.get_logger().info(f"Camera resolution is {self.camera_resolution}")
 
         self.conn = {}
         qos_profile = QoSProfile(depth=10)
@@ -190,7 +198,7 @@ class RobotBaseNode(Node):
         self.broadcaster = TransformBroadcaster(self, qos=qos_profile)
 
         self.bridge = CvBridge()
-        self.camera_info = load_camera_info()
+        self.camera_info = load_camera_info(self.camera_resolution)
 
         self.robot_cmd_vel = {}
         self.robot_odom = {}
@@ -252,7 +260,7 @@ class RobotBaseNode(Node):
                 qos_profile)
 
         self.timer = self.create_timer(0.1, self.timer_callback)
-        self.timer_lidar = self.create_timer(0.5, self.timer_callback_lidar)
+        self.timer_lidar = self.create_timer(0.1, self.timer_callback_lidar)
 
     def timer_callback(self):
         if self.conn_type == 'webrtc':
@@ -277,7 +285,7 @@ class RobotBaseNode(Node):
         # Allow omni-directional movement
         if x != 0.0 or y != 0.0 or z != 0.0:
             self.robot_cmd_vel[robot_num] = gen_mov_command(
-                round(x, 2), round(y, 2), round(z, 2))
+                round(x, 2), round(y, 2), round(z, 2), self.obstacle_avoidance)
 
     def webrtc_req_cb(self, msg, robot_num):
         parameter_str = msg.parameter if msg.parameter else ""
