@@ -8,16 +8,34 @@ from ament_index_python import get_package_share_directory
 
 logger = logging.getLogger(__name__)
 
-libs_path = os.path.join(
-    get_package_share_directory('go2_robot_sdk'),
-    'external_lib'
-)
+# Patch for aioice, so each connection has the same username and password
+import aioice
 
-if os.path.exists(os.path.join(libs_path, 'aioice', '__init__.py')):
-    sys.path.insert(0, os.path.join(libs_path, 'aioice'))
-    sys.path.insert(0, os.path.join(libs_path))
+class Connection(aioice.Connection):
+    local_username = aioice.utils.random_string(4)
+    local_password = aioice.utils.random_string(22)
 
-    logger.info('Patched aioice added to sys.path: {}'.format(sys.path))
-else:
-    logger.error("aioice submodule is not initalized. please init submodules recursively")
-    exit(-1)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.local_username = Connection.local_username
+        self.local_password = Connection.local_password
+
+aioice.Connection = Connection  # type: ignore
+
+
+import aiortc
+
+if Version(aiortc.__version__) == Version("1.10.0"):
+    X509_DIGEST_ALGORITHMS = {
+        "sha-256": "SHA256",
+    }
+    aiortc.rtcdtlstransport.X509_DIGEST_ALGORITHMS = X509_DIGEST_ALGORITHMS
+
+elif Version(aiortc.__version__) >= Version("1.11.0"):
+    # Syntax changed in aiortc 1.11.0, so we need to use the hashes module
+    from cryptography.hazmat.primitives import hashes
+
+    X509_DIGEST_ALGORITHMS = {
+        "sha-256": hashes.SHA256(),  # type: ignore
+    }
+    aiortc.rtcdtlstransport.X509_DIGEST_ALGORITHMS = X509_DIGEST_ALGORITHMS
