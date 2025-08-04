@@ -1,4 +1,7 @@
-aiortc==1.9.0
+aiortc
+aioice
+requests
+packaging
 aiohttp
 paho-mqtt
 python-dotenv
