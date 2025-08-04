@@ -4,8 +4,10 @@
 import asyncio
 import logging
 import os
+import requests
 from typing import Dict, Any
 
+from aioice import Connection
 from aiortc import MediaStreamTrack
 from cv_bridge import CvBridge
 
@@ -74,6 +76,17 @@ class Go2DriverNode(Node):
         # State
         self.joy_state = Joy()
 
+    def _test_webrtc(self, robot_ip: str):
+        """Test if webrtc is working"""
+        a = Connection(ice_controlling=False)
+        b = Connection(ice_controlling=False)
+        if a.local_username != b.local_username:
+            logger.error("Webrtc is not working, local_username is changing for each connection")
+        try:
+            requests.get(f"http://{robot_ip}:9991/con_notify", timeout=5)
+        except:
+            logger.error(f"Could not ask for data connection to robot {robot_ip}")
+
     def _setup_configuration(self) -> RobotConfig:
         """Configuration setup"""
         robot_ip = os.getenv('ROBOT_IP', os.getenv('GO2_IP', ''))
@@ -115,6 +128,9 @@ class Go2DriverNode(Node):
         self.get_logger().info(f"Decode lidar: {config.decode_lidar}")
         self.get_logger().info(f"Publish raw voxel: {config.publish_raw_voxel}")
         self.get_logger().info(f"Obstacle avoidance: {config.obstacle_avoidance}")
+
+        for robot_ip in config.robot_ip_list:
+            self._test_webrtc(robot_ip) 
 
         return config
 
