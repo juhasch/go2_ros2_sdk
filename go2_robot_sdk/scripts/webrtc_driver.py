@@ -38,26 +38,10 @@ from Crypto.Cipher import AES
 from Crypto.Cipher import PKCS1_v1_5
 import requests
 
-# Monkey-patch aioice.Connection to use a fixed username and password accross all instances.
-
-import aioice
-
-class Connection(aioice.Connection):
-    local_username = aioice.utils.random_string(4)
-    local_password = aioice.utils.random_string(22)
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.local_username = Connection.local_username
-        self.local_password = Connection.local_password
-
-aioice.Connection = Connection  # type: ignore
-
 
 # Monkey-patch aiortc.rtcdtlstransport.X509_DIGEST_ALGORITHMS to remove extra SHA algorithms
 # Extra SHA algorithms introduced in aiortc 1.10.0 causes Unity Go2 to use the new SCTP format, despite aiortc using the old SCTP syntax.
 # This new format is not supported by aiortc version as of today (2025-06-02)
-
 
 import aiortc
 from packaging.version import Version
@@ -245,6 +229,7 @@ class Go2Connection():
         self.on_video_frame = on_video_frame
         self.decode_lidar = decode_lidar
 
+        self._test_webrtc(robot_ip)
         self.data_channel = self.pc.createDataChannel("data", id=0)
         self.data_channel.on("open", self.on_data_channel_open)
         self.data_channel.on("message", self.on_data_channel_message)
@@ -254,6 +239,19 @@ class Go2Connection():
 
         if self.on_video_frame:
             self.pc.addTransceiver("video", direction="recvonly")
+
+    def _test_webrtc(self, robot_ip: str):
+        """Test if webrtc is working"""
+        from aioice import Connection
+        logger.info("Testing webrtc...")
+        a = Connection(ice_controlling=False)
+        b = Connection(ice_controlling=False)
+        if a.local_username != b.local_username:
+            logger.error("Webrtc is not working, local_username is changing for each connection")
+        try:
+            requests.get(f"http://{robot_ip}:9991/con_notify", timeout=5)
+        except:
+            logger.error(f"Could not ask for data connection to robot {robot_ip}")
 
     def on_connection_state_change(self):
         logger.info(f"Connection state is {self.pc.connectionState}")

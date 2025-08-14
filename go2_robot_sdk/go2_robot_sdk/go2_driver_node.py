@@ -27,10 +27,25 @@ import logging
 import os
 import threading
 import asyncio
+import numpy as np
+
+
+# Monkey-patch aioice.Connection to use a fixed username and password accross all instances.
+import aioice
+
+class Connection(aioice.Connection):
+    local_username = aioice.utils.random_string(4)
+    local_password = aioice.utils.random_string(22)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.local_username = Connection.local_username
+        self.local_password = Connection.local_password
+
+aioice.Connection = Connection  # type: ignore
 
 from aiortc import MediaStreamTrack
 from cv_bridge import CvBridge
-
 
 from scripts.go2_constants import ROBOT_CMD, RTC_TOPIC
 from scripts.go2_func import gen_command, gen_mov_command
@@ -94,6 +109,10 @@ class RobotBaseNode(Node):
             'obstacle_avoidance').get_parameter_value().bool_value
         self.camera_resolution = self.get_parameter(
             'camera_resolution').get_parameter_value().string_value
+
+        # Obstacle detection state tracking
+        self.obstacle_detection_enabled = False
+        self.obstacle_detection_remote_control = False
 
         self.conn_mode = "single" if (
             len(self.robot_ip_lst) == 1 and self.conn_type != "cyclonedds") else "multi"
@@ -259,33 +278,40 @@ class RobotBaseNode(Node):
                 self.publish_lidar_cyclonedds,
                 qos_profile)
 
-        self.timer = self.create_timer(0.1, self.timer_callback)
-        self.timer_lidar = self.create_timer(0.1, self.timer_callback_lidar)
-
-    def timer_callback(self):
-        if self.conn_type == 'webrtc':
-            self.publish_odom_webrtc()
-            self.publish_odom_topic_webrtc()
-            self.publish_robot_state_webrtc()
-            self.publish_joint_state_webrtc()
-
-    def timer_callback_lidar(self):
-        if self.conn_type == 'webrtc' and self.decode_lidar:
-            self.publish_lidar_webrtc()
-
-        # Publish raw voxel data
-        if self.conn_type == 'webrtc' and self.publish_raw_voxel:
-            self.publish_voxel_webrtc()
-
     def cmd_vel_cb(self, msg, robot_num):
         x = msg.linear.x
         y = msg.linear.y
-        z = msg.angular.z
-
+        z = msg.angular.z  # This is actually yaw (rotation around Z-axis)
+ 
         # Allow omni-directional movement
         if x != 0.0 or y != 0.0 or z != 0.0:
-            self.robot_cmd_vel[robot_num] = gen_mov_command(
+            # Use the existing gen_mov_command which handles obstacle avoidance correctly
+            generated_command = gen_mov_command(
                 round(x, 2), round(y, 2), round(z, 2), self.obstacle_avoidance)
+            self.robot_cmd_vel[robot_num] = generated_command
+            
+            # Debug: Log the actual generated command
+            try:
+                command_data = json.loads(generated_command)
+                topic = command_data.get('topic', 'unknown')
+                api_id = command_data.get('data', {}).get('header', {}).get('identity', {}).get('api_id', 'unknown')
+                parameters = command_data.get('data', {}).get('parameter', 'unknown')
+                logger.info(f"Generated command - Topic: {topic}, API_ID: {api_id}, Parameters: {parameters}")
+                logger.info(f"Sending move command with obstacle avoidance: {self.obstacle_avoidance}")
+                logger.debug(f"Move command: x={x:.3f}, y={y:.3f}, z(yaw)={z:.3f}, obstacle_avoidance={self.obstacle_avoidance}")
+            except Exception as e:
+                logger.error(f"Error parsing generated command: {e}")
+                logger.info(f"Sending move command with obstacle avoidance: {self.obstacle_avoidance}")
+        else:
+            # No movement command - ensure robot is stopped
+            if self.obstacle_avoidance and self.obstacle_detection_enabled:
+                # If obstacle avoidance is enabled and no movement command, send stop command
+                logger.debug("No movement command - sending stop command for obstacle avoidance")
+                self.robot_cmd_vel[robot_num] = gen_mov_command(0.0, 0.0, 0.0, True)
+            elif not self.obstacle_avoidance:
+                # If regular mode and no movement command, send stop command
+                logger.debug("No movement command - sending stop command for regular mode")
+                self.robot_cmd_vel[robot_num] = gen_mov_command(0.0, 0.0, 0.0, False)
 
     def webrtc_req_cb(self, msg, robot_num):
         parameter_str = msg.parameter if msg.parameter else ""
@@ -349,6 +375,19 @@ class RobotBaseNode(Node):
         if robot_num in self.conn and robot_num in self.robot_cmd_vel and self.robot_cmd_vel[
                 robot_num] is not None:
             self.get_logger().info("Move")
+            # Debug: Log what's being sent
+            try:
+                command_to_send = self.robot_cmd_vel[robot_num]
+                if isinstance(command_to_send, str):
+                    command_data = json.loads(command_to_send)
+                    topic = command_data.get('topic', 'unknown')
+                    api_id = command_data.get('data', {}).get('header', {}).get('identity', {}).get('api_id', 'unknown')
+                    self.get_logger().info(f"Sending command - Topic: {topic}, API_ID: {api_id}")
+                else:
+                    self.get_logger().info(f"Sending command (type: {type(command_to_send)})")
+            except Exception as e:
+                self.get_logger().error(f"Error parsing command before sending: {e}")
+            
             self.conn[robot_num].data_channel.send(
                 self.robot_cmd_vel[robot_num])
             self.robot_cmd_vel[robot_num] = None
@@ -365,11 +404,33 @@ class RobotBaseNode(Node):
             move_cmd = gen_command(ROBOT_CMD['BalanceStand'])
             self.conn[robot_num].data_channel.send(move_cmd)
 
+        if robot_num in self.conn and self.joy_state.buttons and self.joy_state.buttons[2]:
+            self.get_logger().info("Toggle obstacle detection")
+            self.toggle_obstacle_detection(robot_num)
+            
+        # Add button 3 for testing movement modes (if available)
+        if robot_num in self.conn and self.joy_state.buttons and len(self.joy_state.buttons) > 3 and self.joy_state.buttons[3]:
+            self.get_logger().info("Testing movement modes")
+            self.test_movement_modes(robot_num)
+            
+        # Add button 4 for force stopping obstacle avoidance (if available)
+        if robot_num in self.conn and self.joy_state.buttons and len(self.joy_state.buttons) > 4 and self.joy_state.buttons[4]:
+            self.get_logger().info("Force stopping obstacle avoidance")
+            self.force_stop_obstacle_avoidance(robot_num)
+            
+        # Add button 5 for emergency stop (if available)
+        if robot_num in self.conn and self.joy_state.buttons and len(self.joy_state.buttons) > 5 and self.joy_state.buttons[5]:
+            self.get_logger().warn("EMERGENCY STOP triggered")
+            self.emergency_stop(robot_num)
+
     def on_validated(self, robot_num):
         if robot_num in self.conn:
             for topic in RTC_TOPIC.values():
                 self.conn[robot_num].data_channel.send(
                     json.dumps({"type": "subscribe", "topic": topic}))
+            
+            # Initialize obstacle detection status
+            self.get_obstacle_detection_status(robot_num)
 
     async def on_video_frame(self, track: MediaStreamTrack, robot_num):
         logger.info(f"Video frame received for robot {robot_num}")
@@ -402,226 +463,41 @@ class RobotBaseNode(Node):
             await asyncio.sleep(0)
 
     def on_data_channel_message(self, _, msg, robot_num):
-
+        """Handle incoming WebRTC data and publish immediately."""
+        
         if msg.get('topic') == RTC_TOPIC["ULIDAR_ARRAY"]:
             self.robot_lidar[robot_num] = msg
+            # Publish LiDAR data immediately
+            if self.conn_type == 'webrtc' and self.decode_lidar:
+                self.publish_lidar_webrtc_immediate(robot_num, msg)
+            
+            # Publish raw voxel data immediately if enabled
+            if self.conn_type == 'webrtc' and self.publish_raw_voxel:
+                self.publish_voxel_webrtc_immediate(robot_num, msg)
 
         if msg.get('topic') == RTC_TOPIC['ROBOTODOM']:
             self.robot_odom[robot_num] = msg
+            # Publish odometry data immediately
+            if self.conn_type == 'webrtc':
+                self.publish_odom_webrtc_immediate(robot_num, msg)
+                self.publish_odom_topic_webrtc_immediate(robot_num, msg)
 
         if msg.get('topic') == RTC_TOPIC['LF_SPORT_MOD_STATE']:
             self.robot_sport_state[robot_num] = msg
+            # Publish robot state and joint state immediately
+            if self.conn_type == 'webrtc':
+                self.publish_robot_state_webrtc_immediate(robot_num, msg)
+                self.publish_joint_state_webrtc_immediate(robot_num, msg)
+                
+        if msg.get('topic') == RTC_TOPIC['MULTIPLE_STATE']:
+            self.handle_multiple_state_message(robot_num, msg)
 
         if msg.get('topic') == RTC_TOPIC['LOW_STATE']:
             self.robot_low_cmd[robot_num] = msg
-
-    def publish_odom_webrtc(self):
-        for i in range(len(self.robot_odom)):
-            if self.robot_odom[str(i)]:
-                odom_trans = TransformStamped()
-                odom_trans.header.stamp = self.get_clock().now().to_msg()
-                odom_trans.header.frame_id = 'odom'
-
-                if self.conn_mode == 'single':
-                    odom_trans.child_frame_id = "base_link"
-                else:
-                    odom_trans.child_frame_id = f"robot{str(i)}/base_link"
-
-                odom_trans.transform.translation.x = self.robot_odom[str(
-                    i)]['data']['pose']['position']['x']
-                odom_trans.transform.translation.y = self.robot_odom[str(
-                    i)]['data']['pose']['position']['y']
-                odom_trans.transform.translation.z = self.robot_odom[str(
-                    i)]['data']['pose']['position']['z'] + 0.07
-                odom_trans.transform.rotation.x = self.robot_odom[str(
-                    i)]['data']['pose']['orientation']['x']
-                odom_trans.transform.rotation.y = self.robot_odom[str(
-                    i)]['data']['pose']['orientation']['y']
-                odom_trans.transform.rotation.z = self.robot_odom[str(
-                    i)]['data']['pose']['orientation']['z']
-                odom_trans.transform.rotation.w = self.robot_odom[str(
-                    i)]['data']['pose']['orientation']['w']
-                self.broadcaster.sendTransform(odom_trans)
-
-    def publish_odom_topic_webrtc(self):
-        for i in range(len(self.robot_odom)):
-            if self.robot_odom[str(i)]:
-                odom_msg = Odometry()
-                odom_msg.header.stamp = self.get_clock().now().to_msg()
-                odom_msg.header.frame_id = 'odom'
-
-                if self.conn_mode == 'single':
-                    odom_msg.child_frame_id = "base_link"
-
-                else:
-                    odom_msg.child_frame_id = f"robot{str(i)}/base_link"
-
-                odom_msg.pose.pose.position.x = self.robot_odom[str(
-                    i)]['data']['pose']['position']['x']
-                odom_msg.pose.pose.position.y = self.robot_odom[str(
-                    i)]['data']['pose']['position']['y']
-                odom_msg.pose.pose.position.z = self.robot_odom[str(
-                    i)]['data']['pose']['position']['z'] + 0.07
-                odom_msg.pose.pose.orientation.x = self.robot_odom[str(
-                    i)]['data']['pose']['orientation']['x']
-                odom_msg.pose.pose.orientation.y = self.robot_odom[str(
-                    i)]['data']['pose']['orientation']['y']
-                odom_msg.pose.pose.orientation.z = self.robot_odom[str(
-                    i)]['data']['pose']['orientation']['z']
-                odom_msg.pose.pose.orientation.w = self.robot_odom[str(
-                    i)]['data']['pose']['orientation']['w']
-                self.go2_odometry_pub[i].publish(odom_msg)
-
-    def publish_lidar_webrtc(self):
-        for i in range(len(self.robot_lidar)):
-            if self.robot_lidar[str(i)]:
-                points = update_meshes_for_cloud2(
-                    self.robot_lidar[str(i)]["decoded_data"]["positions"],
-                    self.robot_lidar[str(i)]["decoded_data"]["uvs"],
-                    self.robot_lidar[str(i)]['data']['resolution'],
-                    self.robot_lidar[str(i)]['data']['origin'],
-                    0
-                )
-                point_cloud = PointCloud2()
-                point_cloud.header = Header(frame_id="odom")
-                point_cloud.header.stamp = self.get_clock().now().to_msg()
-                fields = [
-                    PointField(name='x', offset=0,
-                               datatype=PointField.FLOAT32, count=1),
-                    PointField(name='y', offset=4,
-                               datatype=PointField.FLOAT32, count=1),
-                    PointField(name='z', offset=8,
-                               datatype=PointField.FLOAT32, count=1),
-                    PointField(name='intensity', offset=12,
-                               datatype=PointField.FLOAT32, count=1),
-                ]
-                point_cloud = point_cloud2.create_cloud(
-                    point_cloud.header, fields, points)
-                self.go2_lidar_pub[i].publish(point_cloud)
-
-    def publish_voxel_webrtc(self):
-        for i in range(len(self.robot_lidar)):
-            if self.robot_lidar[str(i)]:
-                voxel_msg = VoxelMapCompressed()
-                voxel_msg.stamp = float(
-                    self.robot_lidar[str(i)]['data']['stamp'])
-                voxel_msg.frame_id = 'odom'
-
-                # Example data: {"type":"msg","topic":"rt/utlidar/voxel_map_compressed",
-                # "data":{"stamp":1.709106e+09,"frame_id":"odom","resolution":0.050000,
-                # "src_size":77824,"origin":[1.675000,5.325000,-0.575000],"width":[128,128,38]}}
-                voxel_msg.resolution = self.robot_lidar[str(
-                    i)]['data']['resolution']
-                voxel_msg.origin = self.robot_lidar[str(i)]['data']['origin']
-                voxel_msg.width = self.robot_lidar[str(i)]['data']['width']
-                voxel_msg.src_size = self.robot_lidar[str(
-                    i)]['data']['src_size']
-                voxel_msg.data = self.robot_lidar[str(i)]['compressed_data']
-
-                self.voxel_pub[i].publish(voxel_msg)
-
-    def publish_joint_state_webrtc(self):
-
-        for i in range(len(self.robot_sport_state)):
-            if self.robot_sport_state[str(i)]:
-                joint_state = JointState()
-                joint_state.header.stamp = self.get_clock().now().to_msg()
-
-                fl_foot_pos_array = [
-                    self.robot_sport_state[str(
-                        i)]["data"]["foot_position_body"][3],
-                    self.robot_sport_state[str(
-                        i)]["data"]["foot_position_body"][4],
-                    self.robot_sport_state[str(
-                        i)]["data"]["foot_position_body"][5]
-                ]
-
-                FL_hip_joint, FL_thigh_joint, FL_calf_joint = get_robot_joints(
-                    fl_foot_pos_array,
-                    0
-                )
-
-                fr_foot_pos_array = [
-                    self.robot_sport_state[str(
-                        i)]["data"]["foot_position_body"][0],
-                    self.robot_sport_state[str(
-                        i)]["data"]["foot_position_body"][1],
-                    self.robot_sport_state[str(
-                        i)]["data"]["foot_position_body"][2]
-                ]
-
-                FR_hip_joint, FR_thigh_joint, FR_calf_joint = get_robot_joints(
-                    fr_foot_pos_array,
-                    1
-                )
-
-                rl_foot_pos_array = [
-                    self.robot_sport_state[str(
-                        i)]["data"]["foot_position_body"][9],
-                    self.robot_sport_state[str(
-                        i)]["data"]["foot_position_body"][10],
-                    self.robot_sport_state[str(
-                        i)]["data"]["foot_position_body"][11]
-                ]
-
-                RL_hip_joint, RL_thigh_joint, RL_calf_joint = get_robot_joints(
-                    rl_foot_pos_array,
-                    2
-                )
-
-                rr_foot_pos_array = [
-                    self.robot_sport_state[str(
-                        i)]["data"]["foot_position_body"][6],
-                    self.robot_sport_state[str(
-                        i)]["data"]["foot_position_body"][7],
-                    self.robot_sport_state[str(
-                        i)]["data"]["foot_position_body"][8]
-                ]
-
-                RR_hip_joint, RR_thigh_joint, RR_calf_joint = get_robot_joints(
-                    rr_foot_pos_array,
-                    3
-                )
-
-                if self.conn_mode == 'single':
-                    joint_state.name = [
-                        'FL_hip_joint', 'FL_thigh_joint', 'FL_calf_joint',
-                        'FR_hip_joint', 'FR_thigh_joint', 'FR_calf_joint',
-                        'RL_hip_joint', 'RL_thigh_joint', 'RL_calf_joint',
-                        'RR_hip_joint', 'RR_thigh_joint', 'RR_calf_joint',
-                    ]
-                else:
-                    joint_state.name = [
-                        f'robot{str(i)}/FL_hip_joint',
-                        f'robot{str(i)}/FL_thigh_joint',
-                        f'robot{str(i)}/FL_calf_joint',
-                        f'robot{str(i)}/FR_hip_joint',
-                        f'robot{str(i)}/FR_thigh_joint',
-                        f'robot{str(i)}/FR_calf_joint',
-                        f'robot{str(i)}/RL_hip_joint',
-                        f'robot{str(i)}/RL_thigh_joint',
-                        f'robot{str(i)}/RL_calf_joint',
-                        f'robot{str(i)}/RR_hip_joint',
-                        f'robot{str(i)}/RR_thigh_joint',
-                        f'robot{str(i)}/RR_calf_joint']
-
-                joint_state.position = [
-                    FL_hip_joint, FL_thigh_joint, FL_calf_joint,
-                    FR_hip_joint, FR_thigh_joint, FR_calf_joint,
-                    RL_hip_joint, RL_thigh_joint, RL_calf_joint,
-                    RR_hip_joint, RR_thigh_joint, RR_calf_joint,
-                ]
-
-                if self.robot_low_cmd:
-                    motors = self.robot_low_cmd[str(i)]['data']['motor_state']
-                    joint_state.position = [
-                        motors[3]['q'], motors[4]['q'], motors[5]['q'],
-                        motors[0]['q'], motors[1]['q'], motors[2]['q'],
-                        motors[9]['q'], motors[10]['q'], motors[11]['q'],
-                        motors[6]['q'], motors[7]['q'], motors[8]['q'],
-                    ]
-
-                self.joint_pub[i].publish(joint_state)
+            
+        if msg.get('topic') == RTC_TOPIC['OBSTACLES_AVOID']:
+            self.get_logger().debug(f"Received OBSTACLES_AVOID message for robot {robot_num}")
+            self.handle_obstacle_detection_response(robot_num, msg)
 
     def publish_webrtc_commands(self, robot_num):
         while True:
@@ -634,43 +510,792 @@ class RobotBaseNode(Node):
             except asyncio.QueueEmpty:
                 break
 
-    def publish_robot_state_webrtc(self):
-        for i in range(len(self.robot_sport_state)):
-            if self.robot_sport_state[str(i)]:
-                go2_state = Go2State()
-                go2_state.mode = self.robot_sport_state[str(i)]["data"]["mode"]
-                go2_state.progress = self.robot_sport_state[str(
-                    i)]["data"]["progress"]
-                go2_state.gait_type = self.robot_sport_state[str(
-                    i)]["data"]["gait_type"]
-                go2_state.position = list(
-                    map(float, self.robot_sport_state[str(i)]["data"]["position"]))
-                go2_state.body_height = float(
-                    self.robot_sport_state[str(i)]["data"]["body_height"])
-                go2_state.velocity = self.robot_sport_state[str(
-                    i)]["data"]["velocity"]
-                go2_state.range_obstacle = list(
-                    map(float, self.robot_sport_state[str(i)]["data"]["range_obstacle"]))
-                go2_state.foot_force = self.robot_sport_state[str(
-                    i)]["data"]["foot_force"]
-                go2_state.foot_position_body = list(
-                    map(float, self.robot_sport_state[str(i)]["data"]["foot_position_body"]))
-                go2_state.foot_speed_body = list(
-                    map(float, self.robot_sport_state[str(i)]["data"]["foot_speed_body"]))
-                self.go2_state_pub[i].publish(go2_state)
+    def publish_odom_webrtc_immediate(self, robot_num, msg):
+        """Publish odometry transform immediately when received."""
+        odom_trans = TransformStamped()
+        odom_trans.header.stamp = self.get_clock().now().to_msg()
+        odom_trans.header.frame_id = 'odom'
 
-                imu = IMU()
-                imu.quaternion = list(
-                    map(float, self.robot_sport_state[str(i)]["data"]["imu_state"]["quaternion"]))
-                imu.accelerometer = list(map(
-                    float, self.robot_sport_state[str(i)]["data"]["imu_state"]["accelerometer"]))
-                imu.gyroscope = list(
-                    map(float, self.robot_sport_state[str(i)]["data"]["imu_state"]["gyroscope"]))
-                imu.rpy = list(
-                    map(float, self.robot_sport_state[str(i)]["data"]["imu_state"]["rpy"]))
-                imu.temperature = self.robot_sport_state[str(
-                    i)]["data"]["imu_state"]["temperature"]
-                self.imu_pub[i].publish(imu)
+        if self.conn_mode == 'single':
+            odom_trans.child_frame_id = "base_link"
+        else:
+            odom_trans.child_frame_id = f"robot{robot_num}/base_link"
+
+        odom_trans.transform.translation.x = msg['data']['pose']['position']['x']
+        odom_trans.transform.translation.y = msg['data']['pose']['position']['y']
+        odom_trans.transform.translation.z = msg['data']['pose']['position']['z'] + 0.07
+        odom_trans.transform.rotation.x = msg['data']['pose']['orientation']['x']
+        odom_trans.transform.rotation.y = msg['data']['pose']['orientation']['y']
+        odom_trans.transform.rotation.z = msg['data']['pose']['orientation']['z']
+        odom_trans.transform.rotation.w = msg['data']['pose']['orientation']['w']
+        self.broadcaster.sendTransform(odom_trans)
+
+    def publish_odom_topic_webrtc_immediate(self, robot_num, msg):
+        """Publish odometry topic immediately when received."""
+        odom_msg = Odometry()
+        odom_msg.header.stamp = self.get_clock().now().to_msg()
+        odom_msg.header.frame_id = 'odom'
+
+        if self.conn_mode == 'single':
+            odom_msg.child_frame_id = "base_link"
+        else:
+            odom_msg.child_frame_id = f"robot{robot_num}/base_link"
+
+        odom_msg.pose.pose.position.x = msg['data']['pose']['position']['x']
+        odom_msg.pose.pose.position.y = msg['data']['pose']['position']['y']
+        odom_msg.pose.pose.position.z = msg['data']['pose']['position']['z'] + 0.07
+        odom_msg.pose.pose.orientation.x = msg['data']['pose']['orientation']['x']
+        odom_msg.pose.pose.orientation.y = msg['data']['pose']['orientation']['y']
+        odom_msg.pose.pose.orientation.z = msg['data']['pose']['orientation']['z']
+        odom_msg.pose.pose.orientation.w = msg['data']['pose']['orientation']['w']
+        self.go2_odometry_pub[int(robot_num)].publish(odom_msg)
+
+    def publish_lidar_webrtc_immediate(self, robot_num, msg):
+        """Publish LiDAR point cloud immediately when received."""
+        decoded_data = msg["decoded_data"]
+        
+        # Handle both old mesh format and new point cloud format
+        if "points" in decoded_data:
+            # New native decoder format - direct point cloud
+            points = decoded_data["points"]
+            # Use intensity values if available, otherwise use height-based intensity
+            if "intensities" in decoded_data and len(decoded_data["intensities"]) > 0:
+                intensities = decoded_data["intensities"].astype(np.float32)
+            elif len(points) > 0:
+                # Fallback: use height-based intensity
+                z_coords = points[:, 2]
+                z_min, z_max = z_coords.min(), z_coords.max()
+                if z_max > z_min:
+                    intensities = (z_coords - z_min) / (z_max - z_min)
+                else:
+                    intensities = np.full(len(points), 0.5, dtype=np.float32)
+            else:
+                intensities = np.array([], dtype=np.float32)
+            
+            if len(points) > 0:
+                points_with_intensity = np.column_stack([points, intensities])
+            else:
+                points_with_intensity = np.empty((0, 4), dtype=np.float32)
+        else:
+            # Old libvoxel format - convert mesh to point cloud
+            points = update_meshes_for_cloud2(
+                decoded_data["positions"],
+                decoded_data["uvs"],
+                msg['data']['resolution'],
+                msg['data']['origin'],
+                0
+            )
+            points_with_intensity = points
+        
+        point_cloud = PointCloud2()
+        point_cloud.header = Header(frame_id="odom")
+        point_cloud.header.stamp = self.get_clock().now().to_msg()
+        fields = [
+            PointField(name='x', offset=0,
+                       datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4,
+                       datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8,
+                       datatype=PointField.FLOAT32, count=1),
+            PointField(name='intensity', offset=12,
+                       datatype=PointField.FLOAT32, count=1),
+        ]
+        point_cloud = point_cloud2.create_cloud(
+            point_cloud.header, fields, points_with_intensity)
+        self.go2_lidar_pub[int(robot_num)].publish(point_cloud)
+
+    def publish_voxel_webrtc_immediate(self, robot_num, msg):
+        """Publish raw voxel data immediately when received."""
+        voxel_msg = VoxelMapCompressed()
+        voxel_msg.stamp = float(msg['data']['stamp'])
+        voxel_msg.frame_id = 'odom'
+        voxel_msg.resolution = msg['data']['resolution']
+        voxel_msg.origin = msg['data']['origin']
+        voxel_msg.width = msg['data']['width']
+        voxel_msg.src_size = msg['data']['src_size']
+        voxel_msg.data = msg['compressed_data']
+        self.voxel_pub[int(robot_num)].publish(voxel_msg)
+
+    def publish_robot_state_webrtc_immediate(self, robot_num, msg):
+        """Publish robot state immediately when received."""
+        go2_state = Go2State()
+        go2_state.mode = msg["data"]["mode"]
+        go2_state.progress = msg["data"]["progress"]
+        go2_state.gait_type = msg["data"]["gait_type"]
+        go2_state.position = list(map(float, msg["data"]["position"]))
+        go2_state.body_height = float(msg["data"]["body_height"])
+        go2_state.velocity = msg["data"]["velocity"]
+        go2_state.range_obstacle = list(map(float, msg["data"]["range_obstacle"]))
+        go2_state.foot_force = msg["data"]["foot_force"]
+        go2_state.foot_position_body = list(map(float, msg["data"]["foot_position_body"]))
+        go2_state.foot_speed_body = list(map(float, msg["data"]["foot_speed_body"]))
+        self.go2_state_pub[int(robot_num)].publish(go2_state)
+
+        imu = IMU()
+        imu.quaternion = list(map(float, msg["data"]["imu_state"]["quaternion"]))
+        imu.accelerometer = list(map(float, msg["data"]["imu_state"]["accelerometer"]))
+        imu.gyroscope = list(map(float, msg["data"]["imu_state"]["gyroscope"]))
+        imu.rpy = list(map(float, msg["data"]["imu_state"]["rpy"]))
+        imu.temperature = msg["data"]["imu_state"]["temperature"]
+        self.imu_pub[int(robot_num)].publish(imu)
+
+    def publish_joint_state_webrtc_immediate(self, robot_num, msg):
+        """Publish joint state immediately when received."""
+        joint_state = JointState()
+        joint_state.header.stamp = self.get_clock().now().to_msg()
+
+        fl_foot_pos_array = [
+            msg["data"]["foot_position_body"][3],
+            msg["data"]["foot_position_body"][4],
+            msg["data"]["foot_position_body"][5]
+        ]
+        FL_hip_joint, FL_thigh_joint, FL_calf_joint = get_robot_joints(fl_foot_pos_array, 0)
+
+        fr_foot_pos_array = [
+            msg["data"]["foot_position_body"][0],
+            msg["data"]["foot_position_body"][1],
+            msg["data"]["foot_position_body"][2]
+        ]
+        FR_hip_joint, FR_thigh_joint, FR_calf_joint = get_robot_joints(fr_foot_pos_array, 1)
+
+        rl_foot_pos_array = [
+            msg["data"]["foot_position_body"][9],
+            msg["data"]["foot_position_body"][10],
+            msg["data"]["foot_position_body"][11]
+        ]
+        RL_hip_joint, RL_thigh_joint, RL_calf_joint = get_robot_joints(rl_foot_pos_array, 2)
+
+        rr_foot_pos_array = [
+            msg["data"]["foot_position_body"][6],
+            msg["data"]["foot_position_body"][7],
+            msg["data"]["foot_position_body"][8]
+        ]
+        RR_hip_joint, RR_thigh_joint, RR_calf_joint = get_robot_joints(rr_foot_pos_array, 3)
+
+        if self.conn_mode == 'single':
+            joint_state.name = [
+                'FL_hip_joint', 'FL_thigh_joint', 'FL_calf_joint',
+                'FR_hip_joint', 'FR_thigh_joint', 'FR_calf_joint',
+                'RL_hip_joint', 'RL_thigh_joint', 'RL_calf_joint',
+                'RR_hip_joint', 'RR_thigh_joint', 'RR_calf_joint',
+            ]
+        else:
+            joint_state.name = [
+                f'robot{robot_num}/FL_hip_joint',
+                f'robot{robot_num}/FL_thigh_joint',
+                f'robot{robot_num}/FL_calf_joint',
+                f'robot{robot_num}/FR_hip_joint',
+                f'robot{robot_num}/FR_thigh_joint',
+                f'robot{robot_num}/FR_calf_joint',
+                f'robot{robot_num}/RL_hip_joint',
+                f'robot{robot_num}/RL_thigh_joint',
+                f'robot{robot_num}/RL_calf_joint',
+                f'robot{robot_num}/RR_hip_joint',
+                f'robot{robot_num}/RR_thigh_joint',
+                f'robot{robot_num}/RR_calf_joint']
+
+        joint_state.position = [
+            FL_hip_joint, FL_thigh_joint, FL_calf_joint,
+            FR_hip_joint, FR_thigh_joint, FR_calf_joint,
+            RL_hip_joint, RL_thigh_joint, RL_calf_joint,
+            RR_hip_joint, RR_thigh_joint, RR_calf_joint,
+        ]
+
+        # Use low state motor data if available for more accurate joint positions
+        if self.robot_low_cmd and robot_num in self.robot_low_cmd:
+            motors = self.robot_low_cmd[robot_num]['data']['motor_state']
+            joint_state.position = [
+                motors[3]['q'], motors[4]['q'], motors[5]['q'],
+                motors[0]['q'], motors[1]['q'], motors[2]['q'],
+                motors[9]['q'], motors[10]['q'], motors[11]['q'],
+                motors[6]['q'], motors[7]['q'], motors[8]['q'],
+            ]
+
+        self.joint_pub[int(robot_num)].publish(joint_state)
+
+    def toggle_obstacle_detection(self, robot_num):
+        """Toggle obstacle detection on/off for the specified robot."""
+        if robot_num not in self.conn:
+            self.get_logger().warn(f"Robot {robot_num} not connected")
+            return
+            
+        try:
+            # First, stop any current movement to prevent double movement
+            self.get_logger().info(f"Stopping current movement before mode switch for robot {robot_num}")
+            self.stop_all_movement(robot_num)
+            
+            # Wait a moment for the stop command to take effect
+            import time
+            time.sleep(0.2)
+            
+            # Toggle the state
+            self.obstacle_detection_enabled = not self.obstacle_detection_enabled
+            action = "enabling" if self.obstacle_detection_enabled else "disabling"
+            self.get_logger().info(f"{action.capitalize()} obstacle detection for robot {robot_num}")
+            
+            # Send the command to the robot
+            if self.obstacle_detection_enabled:
+                self.get_logger().info(f"Calling enable_obstacle_detection for robot {robot_num}")
+                self.enable_obstacle_detection(robot_num)
+            else:
+                self.get_logger().info(f"Calling disable_obstacle_detection for robot {robot_num}")
+                self.disable_obstacle_detection(robot_num)
+            
+            # Update the obstacle avoidance parameter
+            self.get_logger().info(f"Calling update_obstacle_avoidance_parameter for robot {robot_num}")
+            self.update_obstacle_avoidance_parameter(robot_num)
+                
+        except Exception as e:
+            self.get_logger().error(f"Error toggling obstacle detection: {e}")
+
+    def enable_obstacle_detection(self, robot_num):
+        """Enable obstacle detection for the specified robot."""
+        try:
+            # Send enable command via SwitchSet (api_id=1001)
+            command = {
+                "type": "msg",
+                "topic": RTC_TOPIC["OBSTACLES_AVOID"],
+                "data": {
+                    "header": {
+                        "identity": {
+                            "id": int(asyncio.get_event_loop().time() * 1000) % 2147483648,
+                            "api_id": 1001
+                        }
+                    },
+                    "parameter": json.dumps({"enable": True})
+                }
+            }
+            
+            self.conn[robot_num].data_channel.send(json.dumps(command))
+            self.get_logger().info(f"Obstacle detection enabled for robot {robot_num}")
+            
+            # Enable remote control for obstacle avoidance (required for API commands to work)
+            self.get_logger().info(f"Enabling remote control for obstacle avoidance for robot {robot_num}")
+            self.set_obstacle_remote_control(robot_num, True)
+            
+        except Exception as e:
+            self.get_logger().error(f"Error enabling obstacle detection: {e}")
+
+    def disable_obstacle_detection(self, robot_num):
+        """Disable obstacle detection for the specified robot."""
+        try:
+            # Send disable command via SwitchSet (api_id=1001)
+            command = {
+                "type": "msg",
+                "topic": RTC_TOPIC["OBSTACLES_AVOID"],
+                "data": {
+                    "header": {
+                        "identity": {
+                            "id": int(asyncio.get_event_loop().time() * 1000) % 2147483648,
+                            "api_id": 1001
+                        }
+                    },
+                    "parameter": json.dumps({"enable": False})
+                }
+            }
+            
+            self.conn[robot_num].data_channel.send(json.dumps(command))
+            self.get_logger().info(f"Obstacle detection disabled for robot {robot_num}")
+            
+        except Exception as e:
+            self.get_logger().error(f"Error disabling obstacle detection: {e}")
+
+    def get_obstacle_detection_status(self, robot_num):
+        """Get current obstacle detection status for the specified robot."""
+        try:
+            # Send status query via SwitchGet (api_id=1002)
+            command = {
+                "type": "msg",
+                "topic": RTC_TOPIC["OBSTACLES_AVOID"],
+                "data": {
+                    "header": {
+                        "identity": {
+                            "id": int(asyncio.get_event_loop().time() * 1000) % 2147483648,
+                            "api_id": 1002
+                        }
+                    },
+                    "parameter": json.dumps({})
+                }
+            }
+            
+            self.conn[robot_num].data_channel.send(json.dumps(command))
+            self.get_logger().info(f"Obstacle detection status query sent for robot {robot_num}")
+            
+        except Exception as e:
+            self.get_logger().error(f"Error querying obstacle detection status: {e}")
+
+    def set_obstacle_remote_control(self, robot_num, enable=True):
+        """Enable/disable remote API control for obstacle avoidance (api_id=1004)."""
+        try:
+            command = {
+                "type": "msg",
+                "topic": RTC_TOPIC["OBSTACLES_AVOID"],
+                "data": {
+                    "header": {
+                        "identity": {
+                            "id": int(asyncio.get_event_loop().time() * 1000) % 2147483648,
+                            "api_id": 1004
+                        }
+                    },
+                    "parameter": json.dumps({"is_remote_commands_from_api": enable})
+                }
+            }
+            
+            self.conn[robot_num].data_channel.send(json.dumps(command))
+            self.obstacle_detection_remote_control = enable
+            action = "enabled" if enable else "disabled"
+            self.get_logger().info(f"Remote obstacle control {action} for robot {robot_num}")
+            
+        except Exception as e:
+            self.get_logger().error(f"Error setting remote obstacle control: {e}")
+
+    def handle_obstacle_detection_response(self, robot_num, msg):
+        """Handle obstacle detection response messages."""
+        try:
+            self.get_logger().debug(f"Handling obstacle detection response for robot {robot_num}: {msg}")
+            if 'data' in msg and 'header' in msg['data']:
+                api_id = msg['data']['header'].get('identity', {}).get('api_id')
+                self.get_logger().debug(f"Obstacle detection response API ID: {api_id}")
+                
+                if api_id == 1002:  # SwitchGet response
+                    # Parse the response to get current status
+                    if 'data' in msg['data']:
+                        try:
+                            response_data = json.loads(msg['data']['data']) if isinstance(msg['data']['data'], str) else msg['data']['data']
+                            current_status = response_data.get('enable', False)
+                            self.obstacle_detection_enabled = current_status
+                            status_text = "enabled" if current_status else "disabled"
+                            self.get_logger().info(f"Obstacle detection status for robot {robot_num}: {status_text}")
+                        except Exception as e:
+                            self.get_logger().error(f"Error parsing obstacle detection response: {e}")
+                            
+                elif api_id == 1001:  # SwitchSet response
+                    # Check if the command was successful
+                    status = msg['data']['header'].get('status', {})
+                    if status.get('code') == 0:
+                        action = "enabled" if self.obstacle_detection_enabled else "disabled"
+                        self.get_logger().info(f"Obstacle detection {action} successfully for robot {robot_num}")
+                    else:
+                        error_msg = status.get('msg', 'Unknown error')
+                        self.get_logger().error(f"Obstacle detection command failed for robot {robot_num}: {error_msg}")
+                        
+                elif api_id == 1004:  # Remote control response
+                    self.get_logger().info(f"Remote control response received for robot {robot_num}")
+                        
+        except Exception as e:
+            self.get_logger().error(f"Error handling obstacle detection response: {e}")
+
+    def handle_multiple_state_message(self, robot_num, msg):
+        """Handle multiple state messages for obstacle detection status."""
+        try:
+            if 'data' in msg:
+                data = msg['data']
+                # Check if this is a string that needs to be parsed
+                if isinstance(data, str):
+                    try:
+                        data = json.loads(data)
+                    except json.JSONDecodeError:
+                        return
+                
+                # Extract obstacle detection status from obstaclesAvoidSwitch
+                if 'obstaclesAvoidSwitch' in data:
+                    current_status = bool(data['obstaclesAvoidSwitch'])
+                    if current_status != self.obstacle_detection_enabled:
+                        self.obstacle_detection_enabled = current_status
+                        status_text = "enabled" if current_status else "disabled"
+                        self.get_logger().info(f"Obstacle detection status updated from MULTIPLE_STATE for robot {robot_num}: {status_text}")
+                        # Update the obstacle avoidance parameter
+                        self.update_obstacle_avoidance_parameter(robot_num)
+                        
+        except Exception as e:
+            self.get_logger().error(f"Error handling multiple state message: {e}")
+
+    def send_obstacle_aware_move(self, robot_num, x, y, yaw, mode=0):
+        """Send obstacle-aware velocity command (api_id=1003)."""
+        try:
+            command = {
+                "type": "msg",
+                "topic": RTC_TOPIC["OBSTACLES_AVOID"],
+                "data": {
+                    "header": {
+                        "identity": {
+                            "id": int(asyncio.get_event_loop().time() * 1000) % 2147483648,
+                            "api_id": 1003
+                        }
+                    },
+                    "parameter": json.dumps({"x": x, "y": y, "yaw": yaw, "mode": mode})
+                }
+            }
+            
+            self.conn[robot_num].data_channel.send(json.dumps(command))
+            self.get_logger().debug(f"Obstacle-aware move command sent: x={x}, y={y}, yaw={yaw}, mode={mode}")
+            
+        except Exception as e:
+            self.get_logger().error(f"Error sending obstacle-aware move command: {e}")
+
+    def update_obstacle_avoidance_parameter(self, robot_num):
+        """Update the obstacle avoidance parameter based on current state."""
+        if robot_num in self.conn:
+            # Update the parameter that's used in move commands
+            old_value = self.obstacle_avoidance
+            self.obstacle_avoidance = self.obstacle_detection_enabled
+            self.get_logger().info(f"Obstacle avoidance parameter updated: {old_value} -> {self.obstacle_avoidance}")
+            self.get_logger().debug(f"Robot {robot_num}: obstacle_detection_enabled={self.obstacle_detection_enabled}, obstacle_avoidance={self.obstacle_avoidance}")
+
+    def get_obstacle_detection_status_bool(self, robot_num):
+        """Get current obstacle detection status as a boolean."""
+        return self.obstacle_detection_enabled
+
+    def is_obstacle_detection_enabled(self, robot_num):
+        """Check if obstacle detection is currently enabled."""
+        return self.obstacle_detection_enabled
+
+    def send_movement_command(self, robot_num, x, y, z, use_obstacle_avoidance=None):
+        """
+        Send a movement command with optional obstacle avoidance.
+        
+        Args:
+            robot_num: Robot number
+            x: Forward/backward velocity
+            y: Left/right velocity  
+            z: Yaw rotation velocity
+            use_obstacle_avoidance: If None, uses current obstacle_avoidance setting
+                                   If True/False, overrides current setting
+        """
+        if robot_num not in self.conn:
+            self.get_logger().warn(f"Robot {robot_num} not connected")
+            return False
+            
+        try:
+            # Determine whether to use obstacle avoidance
+            if use_obstacle_avoidance is None:
+                use_obstacle_avoidance = self.obstacle_avoidance
+            
+            # Generate the appropriate movement command
+            if use_obstacle_avoidance:
+                # Use obstacle-aware movement (api_id=1003)
+                command = {
+                    "type": "msg",
+                    "topic": RTC_TOPIC["OBSTACLES_AVOID"],
+                    "data": {
+                        "header": {
+                            "identity": {
+                                "id": int(asyncio.get_event_loop().time() * 1000) % 2147483648,
+                                "api_id": 1003
+                            }
+                        },
+                        "parameter": json.dumps({"x": x, "y": y, "yaw": z, "mode": 0})
+                    }
+                }
+                self.get_logger().debug(f"Obstacle-aware move: x={x:.3f}, y={y:.3f}, yaw={z:.3f}")
+            else:
+                # Use regular sport movement (api_id=1008)
+                command = {
+                    "type": "msg",
+                    "topic": RTC_TOPIC["SPORT_MOD"],
+                    "data": {
+                        "header": {
+                            "identity": {
+                                "id": int(asyncio.get_event_loop().time() * 1000) % 2147483648,
+                                "api_id": 1008
+                            }
+                        },
+                        "parameter": json.dumps({"x": x, "y": y, "z": z})
+                    }
+                }
+                self.get_logger().debug(f"Sport move: x={x:.3f}, y={y:.3f}, z={z:.3f}")
+            
+            # Send the command
+            self.conn[robot_num].data_channel.send(json.dumps(command))
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f"Error sending movement command: {e}")
+            return False
+
+    def stop_movement(self, robot_num, use_obstacle_avoidance=None):
+        """
+        Stop robot movement with optional obstacle avoidance.
+        
+        Args:
+            robot_num: Robot number
+            use_obstacle_avoidance: If None, uses current obstacle_avoidance setting
+                                   If True/False, overrides current setting
+        """
+        if robot_num not in self.conn:
+            self.get_logger().warn(f"Robot {robot_num} not connected")
+            return False
+            
+        try:
+            # Determine whether to use obstacle avoidance
+            if use_obstacle_avoidance is None:
+                use_obstacle_avoidance = self.obstacle_avoidance
+            
+            if use_obstacle_avoidance:
+                # Use obstacle-aware stop (api_id=1003 with zero velocities)
+                command = {
+                    "type": "msg",
+                    "topic": RTC_TOPIC["OBSTACLES_AVOID"],
+                    "data": {
+                        "header": {
+                            "identity": {
+                                "id": int(asyncio.get_event_loop().time() * 1000) % 2147483648,
+                                "api_id": 1003
+                            }
+                        },
+                        "parameter": json.dumps({"x": 0.0, "y": 0.0, "yaw": 0.0, "mode": 0})
+                    }
+                }
+                self.get_logger().debug("Obstacle-aware stop command sent")
+            else:
+                # Use regular stop command (api_id=1003)
+                command = {
+                    "type": "msg",
+                    "topic": RTC_TOPIC["SPORT_MOD"],
+                    "data": {
+                        "header": {
+                            "identity": {
+                                "id": int(asyncio.get_event_loop().time() * 1000) % 2147483648,
+                                "api_id": 1003  # StopMove
+                            }
+                        },
+                        "parameter": json.dumps({})
+                    }
+                }
+                self.get_logger().debug("Sport stop command sent")
+            
+            # Send the command
+            self.conn[robot_num].data_channel.send(json.dumps(command))
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f"Error sending stop command: {e}")
+            return False
+
+    def test_movement_modes(self, robot_num):
+        """
+        Test both movement modes to verify they work correctly.
+        This is useful for debugging movement issues.
+        """
+        if robot_num not in self.conn:
+            self.get_logger().warn(f"Robot {robot_num} not connected")
+            return False
+            
+        self.get_logger().info(f"Testing movement modes for robot {robot_num}")
+        
+        # Test regular sport movement
+        self.get_logger().info("Testing regular sport movement...")
+        success1 = self.send_movement_command(robot_num, 0.1, 0.0, 0.0, use_obstacle_avoidance=False)
+        
+        # Wait a moment
+        import time
+        time.sleep(0.5)
+        
+        # Test obstacle-aware movement
+        self.get_logger().info("Testing obstacle-aware movement...")
+        self.get_logger().info(f"Current obstacle_avoidance parameter: {self.obstacle_avoidance}")
+        success2 = self.send_movement_command(robot_num, 0.1, 0.0, 0.0, use_obstacle_avoidance=True)
+        
+        # Wait a moment
+        time.sleep(0.5)
+        
+        # Stop movement
+        self.get_logger().info("Stopping movement...")
+        success3 = self.stop_movement(robot_num)
+        
+        if success1 and success2 and success3:
+            self.get_logger().info("All movement mode tests passed!")
+            return True
+        else:
+            self.get_logger().warn("Some movement mode tests failed!")
+            return False
+
+    def stop_all_movement(self, robot_num):
+        """
+        Stop all robot movement regardless of current mode.
+        This ensures clean stopping before mode switching.
+        """
+        if robot_num not in self.conn:
+            self.get_logger().warn(f"Robot {robot_num} not connected")
+            return False
+            
+        try:
+            self.get_logger().info(f"Stopping all movement for robot {robot_num}")
+            
+            # Stop obstacle avoidance movement first (if it was enabled)
+            if self.obstacle_detection_enabled:
+                self.get_logger().debug("Stopping obstacle avoidance movement")
+                obstacle_stop_command = {
+                    "type": "msg",
+                    "topic": RTC_TOPIC["OBSTACLES_AVOID"],
+                    "data": {
+                        "header": {
+                            "identity": {
+                                "id": int(asyncio.get_event_loop().time() * 1000) % 2147483648,
+                                "api_id": 1003
+                            }
+                        },
+                        "parameter": json.dumps({"x": 0.0, "y": 0.0, "yaw": 0.0, "mode": 0})
+                    }
+                }
+                self.conn[robot_num].data_channel.send(json.dumps(obstacle_stop_command))
+            
+            # Also send regular stop command to ensure complete stopping
+            self.get_logger().debug("Sending regular stop command")
+            regular_stop_command = {
+                "type": "msg",
+                "topic": RTC_TOPIC["SPORT_MOD"],
+                "data": {
+                    "header": {
+                        "identity": {
+                            "id": int(asyncio.get_event_loop().time() * 1000) % 2147483648,
+                            "api_id": 1003  # StopMove
+                        }
+                    },
+                    "parameter": json.dumps({})
+                }
+            }
+            self.conn[robot_num].data_channel.send(json.dumps(regular_stop_command))
+            
+            self.get_logger().info(f"All movement stopped for robot {robot_num}")
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f"Error stopping all movement: {e}")
+            return False
+
+    def force_stop_obstacle_avoidance(self, robot_num):
+        """
+        Force stop obstacle avoidance movement when the robot is stuck in continuous movement.
+        This is useful when obstacle avoidance is enabled but there are no obstacles.
+        """
+        if robot_num not in self.conn:
+            self.get_logger().warn(f"Robot {robot_num} not connected")
+            return False
+            
+        try:
+            self.get_logger().info(f"Force stopping obstacle avoidance movement for robot {robot_num}")
+            
+            # Send multiple stop commands to ensure the robot stops
+            for i in range(3):  # Send 3 stop commands
+                obstacle_stop_command = {
+                    "type": "msg",
+                    "topic": RTC_TOPIC["OBSTACLES_AVOID"],
+                    "data": {
+                        "header": {
+                            "identity": {
+                                "id": int(asyncio.get_event_loop().time() * 1000) % 2147483648,
+                                "api_id": 1003
+                            }
+                        },
+                        "parameter": json.dumps({"x": 0.0, "y": 0.0, "yaw": 0.0, "mode": 0})
+                    }
+                }
+                self.conn[robot_num].data_channel.send(json.dumps(obstacle_stop_command))
+                
+                # Brief wait between commands
+                import time
+                time.sleep(0.1)
+            
+            self.get_logger().info(f"Force stop commands sent for robot {robot_num}")
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f"Error force stopping obstacle avoidance: {e}")
+            return False
+
+    def emergency_stop(self, robot_num):
+        """
+        Emergency stop all robot movement immediately.
+        This sends multiple stop commands to ensure the robot stops.
+        """
+        if robot_num not in self.conn:
+            self.get_logger().warn(f"Robot {robot_num} not connected")
+            return False
+            
+        try:
+            self.get_logger().warn(f"EMERGENCY STOP for robot {robot_num}")
+            
+            # Send multiple stop commands to both topics
+            for i in range(5):  # Send 5 stop commands
+                # Stop obstacle avoidance
+                obstacle_stop = {
+                    "type": "msg",
+                    "topic": RTC_TOPIC["OBSTACLES_AVOID"],
+                    "data": {
+                        "header": {
+                            "identity": {
+                                "id": int(asyncio.get_event_loop().time() * 1000) % 2147483648,
+                                "api_id": 1003
+                            }
+                        },
+                        "parameter": json.dumps({"x": 0.0, "y": 0.0, "yaw": 0.0, "mode": 0})
+                    }
+                }
+                self.conn[robot_num].data_channel.send(json.dumps(obstacle_stop))
+                
+                # Stop regular movement
+                regular_stop = {
+                    "type": "msg",
+                    "topic": RTC_TOPIC["SPORT_MOD"],
+                    "data": {
+                        "header": {
+                            "identity": {
+                                "id": int(asyncio.get_event_loop().time() * 1000) % 2147483648,
+                                "api_id": 1003  # StopMove
+                            }
+                        },
+                        "parameter": json.dumps({})
+                    }
+                }
+                self.conn[robot_num].data_channel.send(json.dumps(regular_stop))
+                
+                # Brief wait between commands
+                import time
+                time.sleep(0.05)  # Faster emergency stop
+            
+            self.get_logger().warn(f"Emergency stop commands sent for robot {robot_num}")
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f"Error during emergency stop: {e}")
+            return False
+
+    def set_obstacle_detection(self, robot_num, enable):
+        """Set obstacle detection to a specific state (enable/disable)."""
+        if robot_num not in self.conn:
+            self.get_logger().warn(f"Robot {robot_num} not connected")
+            return
+            
+        try:
+            # Only change if the state is different
+            if self.obstacle_detection_enabled != enable:
+                # First, stop any current movement to prevent double movement
+                self.get_logger().info(f"Stopping current movement before mode switch for robot {robot_num}")
+                self.stop_all_movement(robot_num)
+                
+                # Wait a moment for the stop command to take effect
+                import time
+                time.sleep(0.2)
+                
+                self.obstacle_detection_enabled = enable
+                action = "enabling" if enable else "disabling"
+                self.get_logger().info(f"{action.capitalize()} obstacle detection for robot {robot_num}")
+                
+                # Send the command to the robot
+                if enable:
+                    self.enable_obstacle_detection(robot_num)
+                else:
+                    self.disable_obstacle_detection(robot_num)
+                
+                # Update the obstacle avoidance parameter
+                self.update_obstacle_avoidance_parameter(robot_num)
+            else:
+                status_text = "enabled" if enable else "disabled"
+                self.get_logger().info(f"Obstacle detection already {status_text} for robot {robot_num}")
+                
+        except Exception as e:
+            self.get_logger().error(f"Error setting obstacle detection: {e}")
 
 
 async def run(conn, robot_num, node):
