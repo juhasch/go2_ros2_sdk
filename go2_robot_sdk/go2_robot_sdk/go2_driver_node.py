@@ -72,7 +72,7 @@ from sensor_msgs.msg import Image, CameraInfo
 
 logging.basicConfig(level=logging.WARN)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.WARNING)
 
 
 class RobotBaseNode(Node):
@@ -296,12 +296,12 @@ class RobotBaseNode(Node):
                 topic = command_data.get('topic', 'unknown')
                 api_id = command_data.get('data', {}).get('header', {}).get('identity', {}).get('api_id', 'unknown')
                 parameters = command_data.get('data', {}).get('parameter', 'unknown')
-                logger.info(f"Generated command - Topic: {topic}, API_ID: {api_id}, Parameters: {parameters}")
-                logger.info(f"Sending move command with obstacle avoidance: {self.obstacle_avoidance}")
+                logger.debug(f"Generated command - Topic: {topic}, API_ID: {api_id}, Parameters: {parameters}")
+                logger.debug(f"Sending move command with obstacle avoidance: {self.obstacle_avoidance}")
                 logger.debug(f"Move command: x={x:.3f}, y={y:.3f}, z(yaw)={z:.3f}, obstacle_avoidance={self.obstacle_avoidance}")
             except Exception as e:
                 logger.error(f"Error parsing generated command: {e}")
-                logger.info(f"Sending move command with obstacle avoidance: {self.obstacle_avoidance}")
+                logger.debug(f"Sending move command with obstacle avoidance: {self.obstacle_avoidance}")
         else:
             # No movement command - ensure robot is stopped
             if self.obstacle_avoidance and self.obstacle_detection_enabled:
@@ -374,7 +374,7 @@ class RobotBaseNode(Node):
     def joy_cmd(self, robot_num):
         if robot_num in self.conn and robot_num in self.robot_cmd_vel and self.robot_cmd_vel[
                 robot_num] is not None:
-            self.get_logger().info("Move")
+            self.get_logger().debug("Move")
             # Debug: Log what's being sent
             try:
                 command_to_send = self.robot_cmd_vel[robot_num]
@@ -382,9 +382,9 @@ class RobotBaseNode(Node):
                     command_data = json.loads(command_to_send)
                     topic = command_data.get('topic', 'unknown')
                     api_id = command_data.get('data', {}).get('header', {}).get('identity', {}).get('api_id', 'unknown')
-                    self.get_logger().info(f"Sending command - Topic: {topic}, API_ID: {api_id}")
+                    self.get_logger().debug(f"Sending command - Topic: {topic}, API_ID: {api_id}")
                 else:
-                    self.get_logger().info(f"Sending command (type: {type(command_to_send)})")
+                    self.get_logger().debug(f"Sending command (type: {type(command_to_send)})")
             except Exception as e:
                 self.get_logger().error(f"Error parsing command before sending: {e}")
             
